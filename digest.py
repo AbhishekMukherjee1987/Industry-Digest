@@ -17,13 +17,22 @@ Required environment variables (set as GitHub Actions secrets):
 
 import os
 import smtplib
+import socket
 import datetime
+import urllib.parse
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import feedparser
 import markdown
 from anthropic import Anthropic
+
+# Some feed hosts reject requests without a browser-like User-Agent.
+feedparser.USER_AGENT = (
+    "Mozilla/5.0 (compatible; IndustryDigestBot/1.0; +https://github.com/)"
+)
+# Avoid hanging forever on a slow/unresponsive feed.
+socket.setdefaulttimeout(15)
 
 
 # ---------------------------------------------------------------------------
@@ -45,17 +54,57 @@ TOPICS = [
     "Energy Management (EMS, DERMS, demand response)",
 ]
 
-# Curated, free, no-API-key-needed RSS feeds covering the target industries.
-RSS_FEEDS = [
+# --- Static, curated trade publication feeds -------------------------------
+STATIC_RSS_FEEDS = [
     ("Buildings.com", "https://www.buildings.com/rss"),
     ("Facility Executive", "https://facilityexecutive.com/feed/"),
     ("Energy Manager Today", "https://www.energymanagertoday.com/feed/"),
     ("GreenBiz", "https://www.greenbiz.com/rss.xml"),
     ("Smart Energy International", "https://www.smart-energy.com/feed/"),
-    ("Electrical Contractor Magazine", "https://www.ecmag.com/rss.xml"),
     ("Microgrid Knowledge", "https://www.microgridknowledge.com/feed/"),
     ("Renewable Energy World", "https://www.renewableenergyworld.com/feed/"),
+    ("Utility Dive", "https://www.utilitydive.com/feeds/news/"),
+    ("ESG Today", "https://www.esgtoday.com/feed/"),
+    ("T&D World", "https://www.tdworld.com/rss.xml"),
+    ("Facilities Net", "https://www.facilitiesnet.com/rss/"),
+    ("PV Magazine", "https://www.pv-magazine.com/feed/"),
 ]
+
+
+def google_news_rss(query):
+    """Build a Google News RSS search feed URL for a given query.
+
+    Google News RSS aggregates across thousands of publishers and requires
+    no API key, which is what makes broad coverage possible without
+    maintaining a huge manual feed list.
+    """
+    encoded = urllib.parse.quote(query)
+    return f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en"
+
+
+# --- Topic-driven Google News searches --------------------------------------
+# These broaden coverage well beyond any fixed set of trade publications.
+TOPIC_NEWS_QUERIES = [
+    "smart building management system",
+    "building automation AI",
+    "energy management system DERMS",
+    "demand response virtual power plant",
+    "power management electrification grid",
+    "microgrid battery storage commercial",
+    "building decarbonization regulation",
+    "net zero building technology",
+]
+
+# --- Company-driven Google News searches -------------------------------------
+COMPANY_NEWS_QUERIES = [
+    f'"{c}" energy OR buildings OR power management' for c in COMPANIES
+]
+
+RSS_FEEDS = (
+    STATIC_RSS_FEEDS
+    + [(f"Google News: {q}", google_news_rss(q)) for q in TOPIC_NEWS_QUERIES]
+    + [(f"Google News: {q}", google_news_rss(q)) for q in COMPANY_NEWS_QUERIES]
+)
 
 LOOKBACK_DAYS = 8  # slightly more than a week to avoid gaps
 MODEL = "claude-sonnet-4-6"
@@ -68,6 +117,7 @@ MODEL = "claude-sonnet-4-6"
 def fetch_rss_digest():
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=LOOKBACK_DAYS)
     lines = []
+    seen_titles = set()
 
     for source_name, url in RSS_FEEDS:
         try:
@@ -91,13 +141,20 @@ def fetch_rss_digest():
                 continue
 
             title = getattr(entry, "title", "Untitled")
+
+            # Dedup: many Google News queries will surface the same story.
+            title_key = title.strip().lower()
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+
             summary = getattr(entry, "summary", "")
             # Trim long summaries
-            summary = (summary[:200] + "...") if len(summary) > 200 else summary
+            summary = (summary[:160] + "...") if len(summary) > 160 else summary
             lines.append(f"- [{source_name}] {title} — {summary}")
 
             count += 1
-            if count >= 8:  # cap per source to keep prompt manageable
+            if count >= 5:  # cap per source to keep prompt manageable
                 break
 
     return "\n".join(lines) if lines else "(No recent RSS items retrieved.)"
@@ -150,6 +207,13 @@ each major area this week)
 ### Analysis
 (2-3 paragraphs)
 
+## Leadership Voices
+(What industry leaders and executives are publicly saying this week — see
+search instructions below. 4-6 bullet points, each naming the person, their
+role/company, and the substance of what they said. If a bullet draws on a
+LinkedIn post, name the platform. If genuinely nothing notable surfaced,
+say so honestly rather than inventing commentary.)
+
 ## Company Watch
 (Short bullets on any notable moves this week from: {", ".join(COMPANIES)}.
 If nothing notable, say so briefly.)
@@ -161,7 +225,7 @@ to keep an eye on next week, and why.)
 ---
 
 CONSTRAINTS:
-- Total length: aim for roughly 5 pages of normal reading (around 1800-2400 words).
+- Total length: aim for roughly 5-6 pages of normal reading (around 2200-2800 words).
 - Use web search to verify and enrich the information below with the latest news
   (last 7 days). Prioritize primary sources (company newsrooms, Reuters, Bloomberg,
   trade press) over aggregators.
@@ -170,7 +234,23 @@ CONSTRAINTS:
   generic commentary.
 - Do not invent facts or attribute quotes that you cannot verify via search.
 
-RAW RSS HEADLINES FROM THE LAST {LOOKBACK_DAYS} DAYS (use as starting points/leads,
+SEARCH STRATEGY FOR "LEADERSHIP VOICES" (do this in addition to general news searches):
+- Run targeted searches for public commentary from executives and thought leaders
+  at the tracked companies ({", ".join(COMPANIES)}) and from respected industry
+  voices (e.g. RMI, ASHRAE, IEA, World Economic Forum energy team) on the topics
+  above. Useful query patterns include:
+  - "[Company name] CEO LinkedIn [topic]"
+  - "site:linkedin.com [Company name] energy management 2026"
+  - "[Company name] executive interview energy transition"
+  - "[industry topic] keynote OR panel 2026"
+  - "[Company name] earnings call buildings OR energy segment commentary"
+- Focus on what leaders are saying ABOUT strategy, market direction, AI in
+  buildings/energy, electrification, or regulation — not just product
+  announcements (those belong in the per-topic "What's New" sections).
+- If a LinkedIn post or interview cannot be found or verified, do not fabricate
+  one — note that public commentary was limited this week instead.
+
+RAW RSS / NEWS HEADLINES FROM THE LAST {LOOKBACK_DAYS} DAYS (use as starting points/leads,
 verify and expand via search — do not just repeat these):
 {rss_digest}
 """
@@ -181,7 +261,7 @@ def generate_digest(client, rss_digest):
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=8000,
+        max_tokens=11000,
         tools=[{"type": "web_search_20250305", "name": "web_search"}],
         messages=[{"role": "user", "content": prompt}],
     )
