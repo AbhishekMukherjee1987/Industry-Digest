@@ -74,7 +74,7 @@ From now on, it runs automatically every Friday. No maintenance required.
 The cron schedule is in `.github/workflows/weekly-digest.yml`:
 
 ```yaml
-- cron: "45 16 * * 5"
+- cron: "45 14 * * 5"
 ```
 
 GitHub Actions cron is always in **UTC**. `0 9 * * 5` = 09:00 UTC every Friday,
