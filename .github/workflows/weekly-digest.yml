@@ -2,7 +2,7 @@ name: Weekly Industry Digest
 
 on:
   schedule:
-    - cron: "45 14 * * 5"
+    - cron: "00 09 * * 5"
   workflow_dispatch: {}
 
 jobs:
